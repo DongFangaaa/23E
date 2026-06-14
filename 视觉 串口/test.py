@@ -1,6 +1,12 @@
 import cv2
 import numpy as np
 
+#传入运行计划 默认为0滞空
+plan = 0 
+
+#注意第一次上电须复位  将current_state赋为-1
+current_state = -2# 位置状态 滞空
+
 # 定义一个空的回调函数，用于滑动条（Trackbar）的回调参数
 def nothing(x):
     pass
@@ -95,7 +101,7 @@ while True:
 
         #中线
         center_line = (ordered_outer + ordered_inner) / 2.0
-        center_line = center_line.astype("int32") #中线顶点坐标
+        center_line = center_line.astype("int32")#中线顶点坐标  此时为浮点数
 
         cv2.drawContours(frame,[outer_approx],-1,(255,0,0),1) #外框
         cv2.drawContours(frame,[inner_approx],-1,(0,0,255),1) #内框
@@ -131,16 +137,77 @@ while True:
 
     #找激光轮廓 算出重心
     contours_mask , _ = cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+
+    find = False #标志位 是否读取激光点
+    cx,cy = 0,0
+
     for contour in contours_mask:
         if cv2.contourArea(contour) > 20:
             M = cv2.moments(contour)
             if M["m00"] != 0:
                 cx = int(M["m10"]/M["m00"])
                 cy = int(M["m01"]/M["m00"])
+                find = True #成功找到
 
                 #在重心画一个绿色的十字准星
                 cv2.drawMarker(frame,(cx,cy),(0,255,0),cv2.MARKER_CROSS,20,2)
                 cv2.putText(frame,f"laser({cx},{cy})",(cx+10,cy-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),2)# 显示坐标
+
+    if len(valid_rects) >= 2 and find:
+    # 将之前识别出的中线和重心 转换到一个虚拟场中
+        dst_pts = np.array([
+            [0,0],
+            [0,500],
+            [500,500],
+            [500,0],
+        ],dtype="float32")
+
+        M = cv2.getPerspectiveTransform(center_line.astype("float32"),dst_pts) #生成转换矩阵
+
+        point_red = np.array([[[cx,cy]]],dtype="float32") #激光点
+        point_red_pts = cv2.perspectiveTransform(point_red,M) #虚拟场中对应的激光点
+        x_pts = int(point_red_pts[0][0][0])
+        y_pts = int(point_red_pts[0][0][1]) #对应坐标
+
+        error_x = 0
+        error_y = 0 #偏差
+
+        #单片机得到的偏差为正或负  x为正代表需要向下  为负代表需要向上  y为正代表需要向右 为负代表需要向左
+        match plan: #运行计划
+            case 1:#从原点顺时针运行
+                match current_state:
+                    case -1:#-1复位
+                        error_x = 0 - x_pts
+                        error_y = 0 - y_pts
+                        if  abs(x_pts) < 20 and abs(y_pts) < 20:
+                            current_state = 0
+                    
+                    case 0:#上
+                        error_x = 0 - x_pts 
+                        error_y = 20
+                        if y_pts > 480:
+                            current_state = 1
+
+                    case 1:#右
+                        error_y = 500 - y_pts
+                        error_x = 20
+                        if x_pts > 480:
+                            current_state = 2
+
+                    case 2:#下
+                        error_x = 500 - x_pts
+                        error_y = -20
+                        if y_pts < 20:
+                            current_state = 3
+
+                    case 3:#左
+                        error_y = 0 - y_pts
+                        error_x = -20
+                        if x_pts < 20:
+                            current_state = 4
+
+                    case 4:#停
+                        error_x = error_y = 0
 
     cv2.imshow("Trackbars",hsv_img)
     cv2.imshow("Camera", frame)
