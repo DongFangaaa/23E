@@ -1,12 +1,6 @@
 import cv2
 import numpy as np
 
-#传入运行计划 默认为0滞空
-plan = 0 
-
-#注意第一次上电须复位  将current_state赋为-1
-current_state = -2# 位置状态 滞空
-
 # 定义一个空的回调函数，用于滑动条（Trackbar）的回调参数
 def nothing(x):
     pass
@@ -21,12 +15,12 @@ def order_points(pts):
     rect[2] = pts[np.argmax(s)] #右下
 
     diff = np.diff(pts,axis=1) #单个y-x
-    rect[1] = pts[np.argmax(diff)] #右上
-    rect[3] = pts[np.argmin(diff)] #左下
+    rect[1] = pts[np.argmin(diff)] #右上
+    rect[3] = pts[np.argmax(diff)] #左下
 
     return rect
 
-cap = cv2.VideoCapture(0) # 连接 初始化摄像头 0为电脑摄像头
+cap = cv2.VideoCapture(1) # 连接 初始化摄像头 0为电脑摄像头
 
 #设置显示高宽
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)  # 设置宽为320
@@ -56,6 +50,10 @@ while True:
 
     kernel = np.ones((5,5),np.uint8) #定义一个5x5的卷积核
 
+    if not ret:
+        print("读取失败")
+        break
+
     #先将图像转化为灰度，再高斯模糊去噪
     gray_img = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY) # 转化为灰度图
     gray_Biur_img = cv2.GaussianBlur(gray_img,(5,5),0) #高斯模糊去噪
@@ -63,18 +61,13 @@ while True:
     #先高斯模糊去噪，再转化为HSV
     blurred = cv2.GaussianBlur(frame,(5,5),0) #高斯模糊去噪
     hsv_img = cv2.cvtColor(blurred,cv2.COLOR_BGR2HSV) # 转化为HSV
-
-    if not ret:
-        print("读取失败")
-        break
-        
-
+    
     #灰度寻找线框
     Low = cv2.getTrackbarPos("low","Camera") #获取当前canny参数
     High = cv2.getTrackbarPos("high","Camera")
 
     edges = cv2.Canny(gray_Biur_img,Low,High) #提取边缘
-    edges = cv2.dilate(edges,kernel,iterations=1)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel,iterations=2) #闭运算 先膨胀再腐蚀 使得边缘闭合
     contours, _ = cv2.findContours(edges,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE) #找出轮廓
 
     valid_rects = [] #收集最后内外框
@@ -157,9 +150,9 @@ while True:
     # 将之前识别出的中线和重心 转换到一个虚拟场中
         dst_pts = np.array([
             [0,0],
-            [0,500],
-            [500,500],
             [500,0],
+            [500,500],
+            [0,500], #顺时针
         ],dtype="float32")
 
         M = cv2.getPerspectiveTransform(center_line.astype("float32"),dst_pts) #生成转换矩阵
@@ -172,49 +165,20 @@ while True:
         error_x = 0
         error_y = 0 #偏差
 
+        virtual_frame = cv2.warpPerspective(frame, M, (500, 500))
+        cv2.imshow("virtual", virtual_frame)
+
         #单片机得到的偏差为正或负  x为正代表需要向下  为负代表需要向上  y为正代表需要向右 为负代表需要向左
-        match plan: #运行计划
-            case 1:#从原点顺时针运行
-                match current_state:
-                    case -1:#-1复位
-                        error_x = 0 - x_pts
-                        error_y = 0 - y_pts
-                        if  abs(x_pts) < 20 and abs(y_pts) < 20:
-                            current_state = 0
-                    
-                    case 0:#上
-                        error_x = 0 - x_pts 
-                        error_y = 20
-                        if y_pts > 480:
-                            current_state = 1
-
-                    case 1:#右
-                        error_y = 500 - y_pts
-                        error_x = 20
-                        if x_pts > 480:
-                            current_state = 2
-
-                    case 2:#下
-                        error_x = 500 - x_pts
-                        error_y = -20
-                        if y_pts < 20:
-                            current_state = 3
-
-                    case 3:#左
-                        error_y = 0 - y_pts
-                        error_x = -20
-                        if x_pts < 20:
-                            current_state = 4
-
-                    case 4:#停
-                        error_x = error_y = 0
+        error_x = 250 - x_pts
+        error_y = 250 - y_pts
 
     cv2.imshow("Trackbars",hsv_img)
     cv2.imshow("Camera", frame)
-    cv2.imshow("Mask",mask)
-    cv2.imshow("Gray",gray_img)
+    #cv2.imshow("Mask",mask)
+    #cv2.imshow("Gray",gray_img)
     cv2.imshow("Canny",edges)
 
+    
     if cv2.waitKey(1) & 0xFF == ord('q'):#比较输入是否为q 按位与取后八位 都是1才为1
         break
 
