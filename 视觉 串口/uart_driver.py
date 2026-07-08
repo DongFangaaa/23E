@@ -28,6 +28,10 @@ class UART_Sender:
         以S<X>,<Y>E\n的格式发送
         为utf-8编码
         """
+
+        #测试数据
+        print(f"error :({error_x},{error_y})")
+        
         if self.ser and self.ser.is_open:
             try:
                 data = f"S{error_x},{error_y}E\n"

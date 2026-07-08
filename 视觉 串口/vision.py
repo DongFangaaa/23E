@@ -1,5 +1,8 @@
 import cv2
 import numpy as np
+from uart_driver import UART_Sender
+
+uart = UART_Sender(port='COM18', baudrate=115200) # 初始化串口   记得修改端口
 
 # 定义一个空的回调函数，用于滑动条（Trackbar）的回调参数
 def nothing(x):
@@ -135,17 +138,19 @@ while True:
     cx,cy = 0,0
 
     for contour in contours_mask:
-        if cv2.contourArea(contour) > 20:
+        if cv2.contourArea(contour) > 60:
             M = cv2.moments(contour)
             if M["m00"] != 0:
                 cx = int(M["m10"]/M["m00"])
                 cy = int(M["m01"]/M["m00"])
                 find = True #成功找到
 
-                #在重心画一个绿色的十字准星
-                cv2.drawMarker(frame,(cx,cy),(0,255,0),cv2.MARKER_CROSS,20,2)
-                cv2.putText(frame,f"laser({cx},{cy})",(cx+10,cy-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),2)# 显示坐标
+                #在重心画一个绿色的十字准星     原始坐标
+                # cv2.drawMarker(frame,(cx,cy),(0,255,0),cv2.MARKER_CROSS,20,2)
+                # cv2.putText(frame,f"laser({cx},{cy})",(cx+10,cy-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),2)# 显示坐标
 
+
+    # target_find = False #标志位 是否读取到目标
     if len(valid_rects) >= 2 and find:
     # 将之前识别出的中线和重心 转换到一个虚拟场中
         dst_pts = np.array([
@@ -154,6 +159,7 @@ while True:
             [500,500],
             [0,500], #顺时针
         ],dtype="float32")
+        # target_find = True
 
         M = cv2.getPerspectiveTransform(center_line.astype("float32"),dst_pts) #生成转换矩阵
 
@@ -162,15 +168,29 @@ while True:
         x_pts = int(point_red_pts[0][0][0])
         y_pts = int(point_red_pts[0][0][1]) #对应坐标
 
+
+        print(f"原始({cx},{cy}) -> 虚拟场坐标: ({x_pts}, {y_pts})")
         error_x = 0
         error_y = 0 #偏差
 
         virtual_frame = cv2.warpPerspective(frame, M, (500, 500))
+        
+        #在重心画一个黄色的十字准星
+        cv2.drawMarker(virtual_frame,(x_pts,y_pts),(255,255,0),cv2.MARKER_CROSS,20,2)
+        cv2.putText(virtual_frame,f"laser({x_pts},{y_pts})",(x_pts+10,y_pts-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(255,255,0),2)# 显示坐标
+
         cv2.imshow("virtual", virtual_frame)
 
         #单片机得到的偏差为正或负  x为正代表需要向下  为负代表需要向上  y为正代表需要向右 为负代表需要向左
         error_x = 250 - x_pts
         error_y = 250 - y_pts
+
+        uart.send_error(error_x,error_y) #发送偏差数据
+        cv2.putText(frame, f"TX: S{error_x},{error_y}E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    else:
+        uart.target_lost() #目标丢失
+        cv2.putText(frame, "Target Lost: S9999,9999E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
     cv2.imshow("Trackbars",hsv_img)
     cv2.imshow("Camera", frame)
@@ -184,3 +204,4 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+uart.close()
