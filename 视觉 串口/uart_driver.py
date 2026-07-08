@@ -22,7 +22,7 @@ class UART_Sender:
             print(f"connect error:{e}")
             self.ser = None
 
-    def send_error(self,error_x,error_y):
+    def send_error(self,error_x,error_y,target_state):
         """
         发送偏差数据
         以S<X>,<Y>E\n的格式发送
@@ -30,11 +30,11 @@ class UART_Sender:
         """
 
         #测试数据
-        print(f"error :({error_x},{error_y})")
+        print(f"error :({error_x},{error_y},{target_state})")
         
         if self.ser and self.ser.is_open:
             try:
-                data = f"S{error_x},{error_y}E\n"
+                data = f"S{error_x},{error_y},{target_state}E\n"
                 self.ser.write(data.encode('utf-8'))
             except serial.SerialException as e:
                 print(f"send error:{e}")
@@ -43,7 +43,7 @@ class UART_Sender:
         """
         目标丢失时发送9999,9999
         """
-        self.send_error(9999,9999)
+        self.send_error(9999,9999,0)
 
     def close(self):
         """
@@ -52,6 +52,17 @@ class UART_Sender:
         if self.ser and self.ser.is_open:
             self.ser.close()
 
+    def receive(self):
+        """"
+        接收来自下位机的状态控制
+        """
+        if self.ser and self.ser.is_open and self.ser.in_waiting > 0:
+            try:
+                data = self.ser.readline().decode('utf-8').strip()
+                return data
+            except serial.SerialException as e:
+                print(f"receive error:{e}")
+                return 0
 
 """独立监测"""
 if __name__ == "__main__":

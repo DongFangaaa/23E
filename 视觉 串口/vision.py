@@ -4,6 +4,13 @@ from uart_driver import UART_Sender
 
 uart = UART_Sender(port='COM18', baudrate=115200) # 初始化串口   记得修改端口
 
+"""
+云台运动状态 默认为0滞空
+"""
+current_state = 0
+movement_modes = 0
+target_state = 0 # 为0关闭激光 为1开启激光
+
 # 定义一个空的回调函数，用于滑动条（Trackbar）的回调参数
 def nothing(x):
     pass
@@ -26,8 +33,8 @@ def order_points(pts):
 cap = cv2.VideoCapture(1) # 连接 初始化摄像头 0为电脑摄像头
 
 #设置显示高宽
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)  # 设置宽为320
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240) # 设置高为240
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 500)  # 设置宽为500
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 500) # 设置高为500
 
 
 cv2.namedWindow("Trackbars",cv2.WINDOW_NORMAL) # 创建一个窗口用于放置滑动条
@@ -35,9 +42,9 @@ cv2.namedWindow("Camera",cv2.WINDOW_NORMAL)
 cv2.namedWindow("Mask",cv2.WINDOW_NORMAL)
 cv2.namedWindow("Gray",cv2.WINDOW_NORMAL)
 
-cv2.createTrackbar("H Min1", "Trackbars", 0, 179, nothing)# 创建滑动条，控制HSV的H S V的最小值和最大值，H的范围是0-179，S和V的范围是0-255
+cv2.createTrackbar("H Min1", "Trackbars", 0, 179, nothing)# 创建滑动条，控制HSV的H S V
 cv2.createTrackbar("S Min", "Trackbars", 60, 255, nothing) #H色相 S饱和度 V明度
-cv2.createTrackbar("V Min", "Trackbars", 0, 255, nothing)
+cv2.createTrackbar("V Min", "Trackbars", 40, 255, nothing)
 cv2.createTrackbar("H Max1", "Trackbars", 10, 179, nothing)#低段红
 cv2.createTrackbar("S Max", "Trackbars", 255, 255, nothing)
 cv2.createTrackbar("V Max", "Trackbars", 255, 255, nothing)
@@ -50,6 +57,7 @@ cv2.createTrackbar("high","Camera",100,255,nothing)
 
 while True:
     ret, frame = cap.read()
+    current_state = uart.receive()
 
     kernel = np.ones((5,5),np.uint8) #定义一个5x5的卷积核
 
@@ -98,6 +106,8 @@ while True:
         #中线
         center_line = (ordered_outer + ordered_inner) / 2.0
         center_line = center_line.astype("int32")#中线顶点坐标  此时为浮点数
+        center_x = int(np.mean(center_line[:,0])) #中线中心点x坐标
+        center_y = int(np.mean(center_line[:,1])) #中线中心点y坐标
 
         cv2.drawContours(frame,[outer_approx],-1,(255,0,0),1) #外框
         cv2.drawContours(frame,[inner_approx],-1,(0,0,255),1) #内框
@@ -181,16 +191,53 @@ while True:
 
         cv2.imshow("virtual", virtual_frame)
 
-        #单片机得到的偏差为正或负  x为正代表需要向下  为负代表需要向上  y为正代表需要向右 为负代表需要向左
-        error_x = 250 - x_pts
-        error_y = 250 - y_pts
+        #单片机得到的偏差为正或负  x为正代表需要向右  为负代表需要向左  y为正代表需要向下 为负代表需要向上
+        # error_x = 250 - x_pts
+        # error_y = 250 - y_pts
 
-        uart.send_error(error_x,error_y) #发送偏差数据
-        cv2.putText(frame, f"TX: S{error_x},{error_y}E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        if current_state == 0: #滞空
+            error_x = 0
+            error_y = 0
+        elif current_state == 1: #运动方式1 回到中心
+            error_x = 250 - center_x
+            error_y = 250 - center_y # 原系下中点偏差
+            if abs(center_x-250) < 15 and  abs(center_y-250) < 15:
+                current_state = 0
+                target_state = 1
+        # elif current_state == 2: #运动方式2 沿线运动 
+        #     #从（0，0）开始
+        #     if movement_modes == 0: #回到原点
+        #         error_x = 0 - x_pts
+        #         error_y = 0 - y_pts
+        #         if abs(x_pts-0) < 15 and abs(y_pts-0) < 15:
+        #             movement_modes = 1
+        #     elif movement_modes == 1: #顺时针运动
+        #         error_x = 50
+        #         error_y = y_pts - 0
+        #         if abs(500-x_pts) < 25:
+        #             movement_modes = 2
+        #     elif movement_modes == 2:
+        #         error_y = 50
+        #         error_x = 500 - x_pts
+        #         if abs(500-y_pts) < 25:
+        #             movement_modes = 3
+        #     elif movement_modes == 3:
+        #         error_x = -50
+        #         error_y = 500 - y_pts
+        #         if abs(0-x_pts) < 25:
+        #             movement_modes = 4
+        #     elif movement_modes == 4:
+        #         error_y =  -50
+        #         error_x = 0 - x_pts
+        #         if abs(0-y_pts) < 15 and abs(0-x_pts) < 15:
+        #             current_state = 0
 
+        uart.send_error(error_x,error_y,target_state) #发送偏差数据
+        cv2.putText(frame, f"TX: S{error_x},{error_y},{target_state}E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
     else:
         uart.target_lost() #目标丢失
-        cv2.putText(frame, "Target Lost: S9999,9999E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(frame, "Target Lost: S9999,9999,0E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
     cv2.imshow("Trackbars",hsv_img)
     cv2.imshow("Camera", frame)
