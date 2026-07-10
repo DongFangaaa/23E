@@ -1,3 +1,13 @@
+"""
+偏差以utf-8  Serrorx,error_y,target_state,return_stateE\n的形式发送
+target_state 为0关闭激光 为1开启激光
+return_state 为0停止运动（不走PID，直接停止） 为1运动
+error_x为正代表需要向右  为负代表需要向左  error_y为正代表需要向下 为负代表需要向上
+例如 S30，50，0，1E\n  代表向右偏差为30 向下偏差50 激光关闭 云台运动
+目前有两种运动状态 状态1为回到中心 状态2为由原点开始绕框运动
+须传参 current_state 可为0 1 2 代表具体的运动状态
+"""
+
 import cv2
 import numpy as np
 from uart_driver import UART_Sender
@@ -220,7 +230,7 @@ while True:
             cv2.imshow("virtual", virtual_frame)
         else:
             first_point = True
-            
+
         #单片机得到的偏差为正或负  x为正代表需要向右  为负代表需要向左  y为正代表需要向下 为负代表需要向上
         # error_x = 250 - x_pts
         # error_y = 250 - y_pts
