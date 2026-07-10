@@ -289,6 +289,7 @@ while True:
         cv2.putText(frame, f"TX: S{error_x},{error_y},{target_state},{return_state}E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
     else:
+        first_point = True
         uart.target_lost() #目标丢失
         cv2.putText(frame, "Target Lost: S9999,9999,0,1E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 

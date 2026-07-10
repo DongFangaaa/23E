@@ -14,10 +14,10 @@ class UART_Sender:
         self.baudrate = baudrate
         self.ser = None
 
-        self.send_queue = queue.Queue(Maxsize=5)
+        self.send_queue = queue.Queue(maxsize=5)
 
         self.new_receive = None #接受并存储运动状态
-        self.lock = threading.lock() #互斥锁
+        self.lock = threading.Lock() #互斥锁
 
         self.is_running = True
         self.connect()
@@ -49,11 +49,14 @@ class UART_Sender:
             try:
                 send_data = self.send_queue.get_nowait()
                 if send_data:
-                    self.ser.write(send_data('utf-8'))
+                    self.ser.write(send_data)
             except queue.Empty:
                 pass
             except serial.SerialException as e:
                 print(f"send error:{e}")
+                self.ser.close()
+                self.ser = None
+                continue
             
             # 接受 存储数据
             try:
@@ -80,7 +83,7 @@ class UART_Sender:
         data_bytes = data.encode('utf-8')
 
         try:
-            if self.send_queue.full:
+            if self.send_queue.full():
                 self.send_queue.get_nowait() #丢弃过时数据 防止写入大于读取
 
             self.send_queue.put_nowait(data_bytes) #存入新数据
@@ -110,7 +113,7 @@ class UART_Sender:
         主循环调用receive
         """
         with self.lock:
-            state = self.new_receive()
+            state = self.new_receive
             self.new_receive = None
             return state
         
