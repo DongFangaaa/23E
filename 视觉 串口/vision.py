@@ -1,16 +1,24 @@
 """
-偏差以utf-8  Serrorx,error_y,target_state,return_stateE\n的形式发送
-target_state 为0关闭激光 为1开启激光
-return_state 为0停止运动（不走PID，直接停止） 为1运动
-error_x为正代表需要向右  为负代表需要向左  error_y为正代表需要向下 为负代表需要向上
-例如 S30，50，0，1E\n  代表向右偏差为30 向下偏差50 激光关闭 云台运动
-目前有两种运动状态 状态1为回到中心 状态2为由原点开始绕框运动
-须传参 current_state 可为0 1 2 代表具体的运动状态
+偏差以utf-8  Serror_x,error_y,self.target_state,self.state,dist_zE\n的形式发送
+self.target_state 为0关闭激光 为1开启激光
+self.state 为0停止运动
+dist_z 为当前距离面板的距离
+距离为毫米 float
+须根据当前的距离来同步调整P的大小
+dist_z越小P越大
+error_x为正代表需要向左  为负代表需要向右  error_y为正代表需要向上 为负代表需要向下
+注意 和之前的逻辑相反
+例如 S30，50，0，1，150.0E\n  代表向左偏差为30 向上偏差50 激光关闭 云台运动 距离面板150.0毫米
+目前有仅一种运动状态 状态1为回到中心
+须传参 self.state 可为0 1 2 代表具体的运动状态
+会同步返回self.state 若为0 则停止运动
+注 在寻框失败时 暂定dist_z为0.5
 """
 
 import cv2
 import numpy as np
 from uart_driver import UART_Sender
+from pnp_solve import PnP_solve
 
 uart = UART_Sender(port='COM18', baudrate=115200) # 初始化串口   记得修改端口
 
@@ -41,272 +49,255 @@ def order_points(pts):
 
     return rect
 
-cap = cv2.VideoCapture(1) # 连接 初始化摄像头 0为电脑摄像头
+class TargetDetector:
+    """
+    寻找内外方框，计算中心坐标与多边形角点
+    解算PnP姿态
+    """
+    def __init__(self,pnpsolve:PnP_solve):
+        self.pnp = pnpsolve
+        self.last_M = None
+        self.keeptime = 0
+        self.kernel = np.ones((5,5),dtype=np.uint8)
 
-#设置显示高宽
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 500)  # 设置宽为500
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 500) # 设置高为500
+    def detect(self,frame):
+        length , width = frame.shape[:2]
 
+        gray_img = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY) # 转化为灰度图
+        gray_Biur_img = cv2.GaussianBlur(gray_img,(5,5),0)
 
-cv2.namedWindow("Trackbars",cv2.WINDOW_NORMAL) # 创建一个窗口用于放置滑动条
-cv2.namedWindow("Camera",cv2.WINDOW_NORMAL)
-cv2.namedWindow("Mask",cv2.WINDOW_NORMAL)
-cv2.namedWindow("Gray",cv2.WINDOW_NORMAL)
+        #二值化
+        """
+        A 采用大津法
+        """
+        _ , binary = cv2.threshold(gray_Biur_img,0,255,cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-cv2.createTrackbar("H Min1", "Trackbars", 0, 179, nothing)
-cv2.createTrackbar("S Min", "Trackbars", 60, 255, nothing) #H色相 S饱和度 V明度
-cv2.createTrackbar("V Min", "Trackbars", 40, 255, nothing)
-cv2.createTrackbar("H Max1", "Trackbars", 10, 179, nothing)#低段红
-cv2.createTrackbar("S Max", "Trackbars", 255, 255, nothing)
-cv2.createTrackbar("V Max", "Trackbars", 255, 255, nothing)
-cv2.createTrackbar("H Min2","Trackbars",169,179,nothing)#高段红
-cv2.createTrackbar("H Max2", "Trackbars", 179, 179, nothing)
+        """
+        B 采用局部自适应    光线不均匀的时候采用
+        """
+        # binary = cv2.adaptiveThreshold(gray_Biur_img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,blockSize=11,C=2)
 
-# 线框识别调整
-cv2.createTrackbar("low","Camera",30,255,nothing)
-cv2.createTrackbar("high","Camera",100,255,nothing)
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.kernel,iterations=2) #闭运算去除微小噪点
+        contours, _ = cv2.findContours(closed,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE) #找出轮廓
 
-smooth_x = 0.0
-smooth_y = 0.0
-first_point = True
-last_M = None
-keep_time = 0
+        valid_rects = [] #收集最后内外框
 
-while True:
-    ret, frame = cap.read()
-    start_time = cv2.getTickCount()
-    former_state = uart.receive()
-    if former_state is not None:
-        current_state = former_state
+        for contour in contours:
+            area = cv2.contourArea(contour) #计算每个轮廓的面积
+            if area > 1000: #过滤小的噪点
+                perimeter = cv2.arcLength(contour,True) #计算周长 True强行闭合
+                approx = cv2.approxPolyDP(contour,0.02*perimeter,True) #多边形拟合
 
-    kernel = np.ones((5,5),np.uint8) #定义一个5x5的卷积核
-
-    if not ret:
-        print("读取失败")
-        break
-
-    #先将图像转化为灰度，再高斯模糊去噪
-    gray_img = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY) # 转化为灰度图
-    gray_Biur_img = cv2.GaussianBlur(gray_img,(5,5),0) #高斯模糊去噪
-
-    #先高斯模糊去噪，再转化为HSV
-    blurred = cv2.GaussianBlur(frame,(5,5),0) #高斯模糊去噪
-    hsv_img = cv2.cvtColor(blurred,cv2.COLOR_BGR2HSV) # 转化为HSV
-    
-    #灰度寻找线框
-    Low = cv2.getTrackbarPos("low","Camera") #获取当前canny参数
-    High = cv2.getTrackbarPos("high","Camera")
-
-    edges = cv2.Canny(gray_Biur_img,Low,High) #提取边缘
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel,iterations=2) #闭运算 先膨胀再腐蚀 使得边缘闭合
-    contours, _ = cv2.findContours(edges,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE) #找出轮廓
-
-    valid_rects = [] #收集最后内外框
-
-    for contour in contours:
-        area = cv2.contourArea(contour) #计算每个轮廓的面积
-        if area > 1000: #过滤小的噪点
-            perimeter = cv2.arcLength(contour,True) #计算周长 True强行闭合
-            approx = cv2.approxPolyDP(contour,0.02*perimeter,True) #多边形拟合
-
-            if len(approx) == 4: #如果拟合的结果恰好为4，即刚好为矩形线框
-                valid_rects.append((area, approx))
-    
-    #按面积排 大到小
-    valid_rects.sort(key=lambda x:x[0],reverse=True)
-
-    if len(valid_rects) >= 2:
-        outer_approx = valid_rects[0][1] #外框
-        inner_approx = valid_rects[1][1] #内框
-
-        #内外框顶点排序
-        ordered_outer = order_points(outer_approx)
-        ordered_inner = order_points(inner_approx)
-
-        #中线
-        center_line = (ordered_outer + ordered_inner) / 2.0
-        center_line = center_line.astype("int32")#中线顶点坐标  此时为浮点数
-        center_x = int(np.mean(center_line[:,0])) #中线中心点x坐标
-        center_y = int(np.mean(center_line[:,1])) #中线中心点y坐标
-
-        cv2.drawContours(frame,[outer_approx],-1,(255,0,0),1) #外框
-        cv2.drawContours(frame,[inner_approx],-1,(0,0,255),1) #内框
-        cv2.drawContours(frame,[center_line],-1,(0,255,0),3) #中线
-    
-    #HSV找出红色激光位置
-    H_Min1 = cv2.getTrackbarPos("H Min1","Trackbars") 
-    S_Min = cv2.getTrackbarPos("S Min","Trackbars") 
-    V_Min = cv2.getTrackbarPos("V Min","Trackbars") 
-    H_Max1 = cv2.getTrackbarPos("H Max1","Trackbars") 
-    S_Max = cv2.getTrackbarPos("S Max","Trackbars") 
-    V_Max = cv2.getTrackbarPos("V Max","Trackbars") 
-    H_Min2 = cv2.getTrackbarPos("H Min2","Trackbars") 
-    H_Max2 = cv2.getTrackbarPos("H Max2","Trackbars")
-    
-    #低段红
-    lower_bound1 = np.array([H_Min1,S_Min,V_Min]) 
-    upper_bound1 = np.array([H_Max1,S_Max,V_Max]) 
-    #高段红
-    lower_bound2 = np.array([H_Min2,S_Min,V_Min]) 
-    upper_bound2 = np.array([H_Max2,S_Max,V_Max]) 
-
-    #最终需要调节HSV的范围来创建掩膜，目的是将特特定的红色光点提取出来
-    mask1 = cv2.inRange(hsv_img,lower_bound1,upper_bound1) #根据HSV的范围创建掩膜 范围内为白255，范围外为黑0
-    mask2 = cv2.inRange(hsv_img,lower_bound2,upper_bound2)
-
-    #合并mask
-    mask = cv2.bitwise_or(mask1,mask2)
-
-    #定义一个5x5的卷积核，对HSV的掩膜进行腐蚀和膨胀操作，去除噪点
-    mask = cv2.erode(mask,kernel,iterations=1) #腐蚀操作，去除小的白色噪点 防止识别到不需要的红点，但同时会使得目标变小
-    mask = cv2.dilate(mask,kernel,iterations=2) #膨胀操作，第一次恢复目标大小，第二次使得目标变大，增强识别效果
-
-    #找激光轮廓 算出重心
-    contours_mask , _ = cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-
-    find = False #标志位 是否读取激光点
-    cx,cy = 0,0
-
-    for contour in contours_mask:
-        if cv2.contourArea(contour) > 60:
-            M = cv2.moments(contour)
-            if M["m00"] != 0:
-                cx = int(M["m10"]/M["m00"])
-                cy = int(M["m01"]/M["m00"])
-                find = True #成功找到
-
-                #在重心画一个绿色的十字准星     原始坐标
-                # cv2.drawMarker(frame,(cx,cy),(0,255,0),cv2.MARKER_CROSS,20,2)
-                # cv2.putText(frame,f"laser({cx},{cy})",(cx+10,cy-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),2)# 显示坐标
-
-
-    # target_find = False #标志位 是否读取到目标
-    M = None
-    if len(valid_rects) >= 2:
-    # 将之前识别出的中线和重心 转换到一个虚拟场中
-        dst_pts = np.array([
-            [0,0],
-            [500,0],
-            [500,500],
-            [0,500], #顺时针
-        ],dtype="float32")
-        # target_find = True
-
-        M = cv2.getPerspectiveTransform(center_line.astype("float32"),dst_pts) #生成转换矩阵
-        last_M = M
-        keep_time = cv2.getTickCount()
-
-    elif last_M is not None and (cv2.getTickCount() - keep_time) / cv2.getTickFrequency() < 0.2:
-        M = last_M
+                if len(approx) == 4: #如果拟合的结果恰好为4，即刚好为矩形线框
+                    valid_rects.append((area, approx))
         
-    if M is not None:
-        if find:
-            point_red = np.array([[[cx,cy]]],dtype="float32") #激光点
-            point_red_pts = cv2.perspectiveTransform(point_red,M) #虚拟场中对应的激光点
-            row_x = float(point_red_pts[0][0][0])
-            row_y = float(point_red_pts[0][0][1]) #对应坐标
+        #按面积排 大到小
+        valid_rects.sort(key=lambda x:x[0],reverse=True)
 
-            if first_point:
-                smooth_x = row_x
-                smooth_y = row_y
-                first_point = False
-            else:
-                smooth_x = 0.7 * smooth_x + 0.3 * row_x
-                smooth_y = 0.7 * smooth_y + 0.3 * row_y
+        result = {
+            'found': False,
+            'center_x': int(width / 2), 'center_y': int(length / 2),
+            'dist_z': 0.0,'offset_x':0.0,'offset_y':0.0,
+            'yaw': 0.0, 'pitch': 0.0,'roll':0.0,
+            'rvec': None, 'tvec': None,
+            'binary':binary,
+        }
 
-            x_pts = int(smooth_x)
-            y_pts = int(smooth_y)
+        if len(valid_rects) >= 2:
+            outer_approx = valid_rects[0][1] #外框
+            inner_approx = valid_rects[1][1] #内框
 
-            print(f"原始({cx},{cy}) -> 虚拟场坐标: ({x_pts}, {y_pts})")
-            error_x = 0
-            error_y = 0 #偏差
+            #内外框顶点排序
+            ordered_outer = order_points(outer_approx)
+            ordered_inner = order_points(inner_approx)
 
-            virtual_frame = cv2.warpPerspective(frame, M, (500, 500))
-            
-            #在重心画一个黄色的十字准星
-            cv2.drawMarker(virtual_frame,(x_pts,y_pts),(255,255,0),cv2.MARKER_CROSS,20,2)
-            cv2.putText(virtual_frame,f"laser({x_pts},{y_pts})",(x_pts+10,y_pts-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(255,255,0),2)# 显示坐标
+            #中线
+            center_line = (ordered_outer + ordered_inner) / 2.0
+            center_line = center_line.astype("int32")#中线顶点坐标  此时为浮点数
 
-            cv2.imshow("virtual", virtual_frame)
-        else:
-            first_point = True
+            center_x = int(np.mean(center_line[:,0])) #中线中心点x坐标
+            center_y = int(np.mean(center_line[:,1])) #中线中心点y坐标
 
-        #单片机得到的偏差为正或负  x为正代表需要向右  为负代表需要向左  y为正代表需要向下 为负代表需要向上
-        # error_x = 250 - x_pts
-        # error_y = 250 - y_pts
+            # cv2.drawContours(frame,[outer_approx],-1,(255,0,0),1) #外框
+            # cv2.drawContours(frame,[inner_approx],-1,(0,0,255),1) #内框
+            cv2.drawContours(frame,[center_line],-1,(0,255,0),3) #中线
+            cv2.drawMarker(frame, (center_x, center_y), (0, 255, 255), cv2.MARKER_CROSS, 20, 2)#中心点
 
-        error_x = 0
-        error_y = 0
+            #pnp姿态解算
+            success, dist_z, offset_x, offset_y, yaw, pitch, roll, rvec, tvec = self.pnp.solve(ordered_outer)
+            if success:
+                self.pnp.draw_axes(frame,rvec,tvec,axes_length=100.0)
 
-        if current_state == 0: #滞空
-            error_x = 0
-            error_y = 0
-        elif current_state == 1: #运动方式1 回到中心
-            return_state = 1
-            error_x = 250 - center_x
-            error_y = 250 - center_y # 原系下中点偏差
-            if abs(center_x-250) < 15 and  abs(center_y-250) < 15:
-                current_state = 0
-                return_state = 0
-                target_state = 1
-        elif current_state == 2 and find: #运动方式2 沿线运动 
-            #从（0，0）开始
-            target_state = 1
-            if movement_modes == 0: #回到原点
-                error_x = 0 - x_pts
-                error_y = 0 - y_pts
-                if x_pts < 10 and y_pts < 10:
-                    movement_modes = 1
-            elif movement_modes == 1: #顺时针运动
-                error_x = 50
-                error_y = y_pts - 0
-                if x_pts >= 480:
-                    movement_modes = 2
-            elif movement_modes == 2:
-                error_y = 50
-                error_x = 500 - x_pts
-                if y_pts >= 480:
-                    movement_modes = 3
-            elif movement_modes == 3:
-                error_x = -50
-                error_y = 500 - y_pts
-                if x_pts < 20:
-                    movement_modes = 4
-            elif movement_modes == 4:
-                error_y =  -50
-                error_x = 0 - x_pts
-                if x_pts < 15 and y_pts < 15:
-                    current_state = 0
-                    return_state = 0
-                    movement_modes = 0
+            self.keep_time = cv2.getTickCount()
 
-        if abs(error_x) < 5:
-            error_x = 0
-        if abs(error_y) < 5:
-            error_y = 0
+            result.update({
+            'found': True,
+            'center_x': center_x, 'center_y': center_y,
+            'dist_z': dist_z if success else 0.0,
+            'offset_x':offset_x if success else 0.0 ,
+            'offset_y':offset_y if success else 0.0,
+            'yaw': yaw if success else 0.0, 
+            'pitch': pitch if success else 0.0,
+            'roll': roll if success else 0.0,
+            'rvec': rvec, 'tvec': tvec,
+            'binary':binary,
+            })
 
-        uart.send_error(error_x,error_y,target_state,return_state) #发送偏差数据
-        cv2.putText(frame, f"TX: S{error_x},{error_y},{target_state},{return_state}E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    else:
-        first_point = True
-        uart.target_lost() #目标丢失
-        cv2.putText(frame, "Target Lost: S9999,9999,0,1E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-    current_time = cv2.getTickCount()
-    fps = cv2.getTickFrequency() / (current_time - start_time)
-    cv2.putText(frame, f"FPS: {fps:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    cv2.imshow("Trackbars",hsv_img)
-    cv2.imshow("Camera", frame)
-    #cv2.imshow("Mask",mask)
-    #cv2.imshow("Gray",gray_img)
-    cv2.imshow("Canny",edges)
-
+        return result
     
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+class LaserDetector:
+    """
+    从原图像中通过HSV色相定位蓝紫色激光
+    并得到在pnp中的做标
+    """
+    def __init__(self,pnpsolve:PnP_solve):
+        self.pnp = pnpsolve
+        self.smooth_x = 0.0
+        self.smooth_y = 0.0
+        self.first_point = True
+        self.kernel = np.ones((5, 5), dtype=np.uint8)
 
-cap.release()
-cv2.destroyAllWindows()
-uart.close()
+    def detect(self, frame, result):
+        blurred = cv2.GaussianBlur(frame,(5,5),0) #高斯模糊去噪
+        hsv = cv2.cvtColor(blurred,cv2.COLOR_BGR2HSV) # 转化为HSV
+        
+        # 蓝紫色激光
+        lower = np.array([100, 50, 50], dtype=np.uint8)
+        upper = np.array([160, 255, 255], dtype=np.uint8)
+        
+        mask = cv2.inRange(hsv, lower, upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel) # 开运算去细白颗粒
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel) # 闭运算填补可能的空缺
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        found = False
+        px, py = 0, 0
+        bx, by = 0.0, 0.0
+        
+        for contour in contours:
+            if cv2.contourArea(contour) > 20: # 确认发光斑
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    px = int(M["m10"] / M["m00"])
+                    py = int(M["m01"] / M["m00"])
+                    found = True
+                    cv2.drawMarker(frame, (px, py), (0, 255, 0), cv2.MARKER_STAR, 18, 2)
+                    break
+                    
+        # 换算至pnp
+        if found and result['found'] and result['rvec'] is not None:
+            bx , by = self.pnp.point_board(px, py, result['rvec'], result['tvec'])
+            if bx is not None and by is not None:
+                cv2.putText(frame, f"Laser_World: ({bx:.1f}, {by:.1f})mm", \
+                            (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+            
+        return found,bx,by
+    
+class CompetitionStateMachine:
+    """
+    云台调整
+    PnP误差
+    """
+    def __init__(self, uart_sender:UART_Sender,pnpsolve:PnP_solve):
+        self.pnp = pnpsolve
+        self.uart = uart_sender
+        self.state = 0 # 0:静止 1:中心 2:沿边巡线
+        self.target_state = 0  # 0: 关闭激光 1: 开启激光
+        self.return_state = 0  # 0: 停止 1: 运行 
+        self.first_point = True 
+        self.smooth_error_x = 0.0
+        self.smooth_error_y = 0.0
+
+    def step(self, target_result, laser_found, laser_bx, laser_by, frame,current_state):
+        error_x = 0.0
+        error_y = 0.0
+        self.state = current_state
+        
+        if not target_result['found']:
+            if self.uart:
+                self.uart.target_lost()
+            cv2.putText(frame, "Target Lost: S9999,9999,0,1E", (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            self.first_point = True
+            return
+
+        if self.state == 1:
+            if laser_found: #有激光点
+                row_x = laser_bx
+                row_y = laser_by
+
+                if self.first_point:
+                    self.smooth_error_x = row_x
+                    self.smooth_error_y = row_y
+                    self.first_point = False
+                else:
+                    self.smooth_error_x = 0.7 * self.smooth_error_x + 0.3 * row_x
+                    self.smooth_error_y = 0.7 * self.smooth_error_y + 0.3 * row_y
+
+                error_x = self.smooth_error_x
+                error_y = self.smooth_error_y
+            else: #没有激光点 pnp预测
+                predict_bx, predict_by = self.pnp.laser_hit(target_result['rvec'], target_result['tvec'])
+                if predict_bx is not None and predict_by is not None:
+                    error_x = predict_bx
+                    error_y = predict_by
+                else:
+                    error_x = target_result['offset_x']
+                    error_y = target_result['offset_y']
+
+                self.first_point = True
+
+        if abs(error_x) < 15.0 and abs(error_y) < 15.0:
+                self.target_state = 1
+                self.state = 0
+        else:
+                self.target_state = 0
+
+        if abs(error_x) < 2.0: error_x = 0.0
+        if abs(error_y) < 2.0: error_y = 0.0
+
+        # 发送偏差
+        self.uart.send_error(error_x,error_y,self.target_state,self.state,target_result['dist_z']) #发送偏差数据
+        cv2.putText(frame, f"TX: S{error_x},{error_y},{self.target_state},{self.state},{target_result['dist_z']}E", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+
+def main():
+    uart = UART_Sender(port='COM18', baudrate=115200)
+    cap = cv2.VideoCapture(0)
+    
+    pnp_engine = PnP_solve(rect_width_mm=215.0, rect_length_mm=305.0, focal_length=600.0)
+    target_detector = TargetDetector(pnp_engine)
+    laser_detector = LaserDetector(pnp_engine)
+    brain           = CompetitionStateMachine(uart,pnp_engine)
+    
+    while True:
+        start_time = cv2.getTickCount()
+        ret, frame = cap.read()
+        if not ret: 
+            break
+        former_state = uart.receive()
+        if former_state is not None:
+            current_state = former_state #运动状态
+        else:
+            current_state = brain.state
+        
+        target_result = target_detector.detect(frame) #pnp返回值返回值
+        laser_found , laser_bx , laser_by = laser_detector.detect(frame, target_result) #具体运动参数
+        brain.step(target_result, laser_found, laser_bx, laser_by,frame,current_state) #传输参数
+        
+        current_time = cv2.getTickCount()
+        fps = cv2.getTickFrequency() / (current_time - start_time)
+        cv2.putText(frame, f"FPS: {fps:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        cv2.imshow("Camera PnP", frame)
+        cv2.imshow("Binary", target_result['binary'])
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'): break
+        
+    cap.release()
+    cv2.destroyAllWindows()
+    uart.close()
+
+if __name__ == '__main__':
+    main()
+

@@ -70,7 +70,7 @@ class UART_Sender:
 
             time.sleep(0.001)
 
-    def send_error(self,error_x,error_y,target_state,return_state):
+    def send_error(self,error_x,error_y,target_state,return_state,dist_z):
         """
         异步发包
         主循环调用 error存到self.send_queue
@@ -79,7 +79,7 @@ class UART_Sender:
         #测试数据
         # print(f"error :({error_x},{error_y},{target_state},{return_state})")
         
-        data = f"S{error_x},{error_y},{target_state},{return_state}E\n"
+        data = f"S{error_x},{error_y},{target_state},{return_state},{dist_z}E\n"
         data_bytes = data.encode('utf-8')
 
         try:
@@ -95,7 +95,7 @@ class UART_Sender:
         """
         目标丢失时发送9999,9999
         """
-        self.send_error(9999,9999,0,1)
+        self.send_error(9999,9999,0,1,0.5)
 
     def close(self):
         """
