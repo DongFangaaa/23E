@@ -47,7 +47,7 @@ class PnP_solve:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.laser_origin = np.array(data["origin"], dtype=np.float64).reshape(3, 1)
-            self.laser_direction    = np.array(data["direction"], dtype=np.float64).reshape(3, 1)
+            self.laser_direction = np.array(data["direction"], dtype=np.float64).reshape(3, 1)
             print("成功加载参数")
         except Exception as e:
             print("参数加载失败")
