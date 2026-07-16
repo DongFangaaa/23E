@@ -41,7 +41,7 @@ class UART_Sender:
         """
         while self.is_running:
             if not (self.ser and self.ser.is_open):
-                time.sleep(0.5)
+                time.sleep(9999)
                 self.connect()
                 continue
 

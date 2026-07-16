@@ -1,0 +1,35 @@
+{
+  "version": "0.4.36",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "board",
+      "text": "",
+      "points": [
+        [
+          47.5,
+          317.41228070175436
+        ],
+        [
+          679.078947368421,
+          327.938596491228
+        ],
+        [
+          714.1666666666667,
+          764.7807017543857
+        ],
+        [
+          18.5526315789474,
+          767.4122807017541
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "polygon",
+      "flags": {}
+    }
+  ],
+  "imagePath": "img_24.jpg",
+  "imageData": null,
+  "imageHeight": 1280,
+  "imageWidth": 720
+}

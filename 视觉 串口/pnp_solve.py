@@ -137,11 +137,13 @@ class PnP_solve:
 
         O_world = R_inv @ (laser_origin - t)
         d_world = R_inv @ laser_direction
-        if abs(d_world[2, 0]) < 1e-10:
+        if abs(d_world[2, 0]) < 1e-6 or np.isnan(d_world[2, 0]):
             return None,None
         
         s = -O_world[2, 0] / d_world[2, 0]
         P_hit = O_world + s * d_world
+        if np.isnan(P_hit[0, 0]) or np.isnan(P_hit[1, 0]) or np.isinf(P_hit[0, 0]) or np.isinf(P_hit[1, 0]):
+            return None, None
         return float(P_hit[0, 0]), float(P_hit[1, 0]) # 返回pnp预测落点
 
     def draw_axes(self,frame,rvec,tvec,axes_length=100.0):

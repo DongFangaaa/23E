@@ -20,7 +20,9 @@ import cv2
 import numpy as np
 from uart_driver import UART_Sender
 from pnp_solve import PnP_solve
+from ultralytics import YOLO
 
+model = YOLO('best.pt')
 uart = UART_Sender(port='COM18', baudrate=115200) # 初始化串口   记得修改端口
 
 current_state = 1
@@ -46,6 +48,7 @@ def order_points(pts):
 
 class TargetDetector:
     """
+    先用训练好的YOLO找框 对寻找到的部分图像就行大津法
     寻找内外方框，计算中心坐标与多边形角点
     解算PnP姿态
     """
@@ -58,31 +61,49 @@ class TargetDetector:
     def detect(self,frame):
         length , width = frame.shape[:2]
 
-        gray_img = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY) # 转化为灰度图
+        yolo_results = model(frame,verbose=False,conf=0.7)
+
+        roi_x1 , roi_y1 = 0,0
+        roi_x2 , roi_y2 = width,length
+        use_roi = False
+
+        if len(yolo_results) > 0 and len(yolo_results[0].boxes) > 0:
+            # 取置信度最高的那一个黑框
+            box = yolo_results[0].boxes[0].xyxy.cpu().numpy().squeeze()
+            # 多留15个像素 ，防止切图太贴把黑框最边缘切丢了
+            pad = 15
+            roi_x1 = max(0, int(box[0]) - pad)
+            roi_y1 = max(0, int(box[1]) - pad)
+            roi_x2 = min(width, int(box[2]) + pad)
+            roi_y2 = min(length, int(box[3]) + pad)
+            use_roi = True
+
+        # 真正切下需要检测的图像  如果YOLO找到了框，则为找到的图 没找到则为原图
+        detect_img = frame[int(roi_y1):int(roi_y2), int(roi_x1):int(roi_x2)]
+
+        gray_img = cv2.cvtColor(detect_img,cv2.COLOR_BGR2GRAY) # 转化为灰度图
         gray_Biur_img = cv2.GaussianBlur(gray_img,(5,5),0)
 
         #二值化
         """
-        A 采用大津法
+        yolo找到黑框采用大津法 没找到则使用局部自适应
         """
-        #_ , binary = cv2.threshold(gray_Biur_img,0,255,cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-        """
-        B 采用局部自适应    光线不均匀的时候采用
-        """
-        binary = cv2.adaptiveThreshold(gray_Biur_img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,blockSize=5,C=2)
+        if use_roi:
+            _ , binary = cv2.threshold(gray_Biur_img,0,255,cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        else:
+            binary = cv2.adaptiveThreshold(gray_Biur_img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,blockSize=9,C=2)
 
         closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.kernel,iterations=2) #闭运算去除微小噪点
-        closed = cv2.dilate(closed, self.kernel, iterations=1)
+        #closed = cv2.dilate(closed, self.kernel, iterations=1)
         contours, _ = cv2.findContours(closed,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE) #找出轮廓
 
         valid_rects = [] #收集最后内外框
 
         for contour in contours:
             area = cv2.contourArea(contour) #计算每个轮廓的面积
-            if area > 1000: #过滤小的噪点
+            if area > 800: #过滤小的噪点
                 perimeter = cv2.arcLength(contour,True) #计算周长 True强行闭合
-                approx = cv2.approxPolyDP(contour,0.02*perimeter,True) #多边形拟合
+                approx = cv2.approxPolyDP(contour,0.04*perimeter,True) #多边形拟合
 
                 if len(approx) == 4: #如果拟合的结果恰好为4，即刚好为矩形线框
                     valid_rects.append((area, approx))
@@ -100,18 +121,27 @@ class TargetDetector:
         }
 
         if len(valid_rects) >= 2:
-            outer_approx = valid_rects[0][1] #外框
+            outer_approx = valid_rects[0][1].reshape(4,2) #外框
 
             outer_center = np.mean(outer_approx.reshape(4, 2), axis=0) #外框中心
 
-            inner_approx = valid_rects[1][1] #内框
+            inner_approx = valid_rects[1][1].reshape(4,2) #内框
 
             for area, approx in valid_rects[1:]:
                 inner_center = np.mean(approx.reshape(4, 2), axis=0)
 
-                if np.linalg.norm(outer_center - inner_center) < 40.0:
-                    inner_approx = approx #内框
+                if np.linalg.norm(outer_center - inner_center) < 100.0:
+                    inner_approx = approx.reshape(4,2) #内框
                     break 
+            
+
+            """
+            把 ROI 里得到的顶角坐标加回偏移量，映射为全景原图坐标
+            """
+            outer_approx[:, 0] += roi_x1
+            outer_approx[:, 1] += roi_y1
+            inner_approx[:, 0] += roi_x1
+            inner_approx[:, 1] += roi_y1
 
             #内外框顶点排序
             ordered_outer = order_points(outer_approx)
@@ -218,7 +248,7 @@ class CompetitionStateMachine:
         self.state = 1 # 0:静止 1:中心 2:沿边巡线
         self.target_state = 0  # 0: 关闭激光 1: 开启激光
         self.return_state = 0  # 0: 停止 1: 运行 
-        self.first_point = True 
+        self.first_point = True
         self.smooth_error_x = 0.0
         self.smooth_error_y = 0.0
 
