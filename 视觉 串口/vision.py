@@ -21,9 +21,11 @@ import numpy as np
 from uart_driver import UART_Sender
 from pnp_solve import PnP_solve
 from ultralytics import YOLO
+from auto_yolo import YOLO_Work
 
 model = YOLO('best.pt')
 uart = UART_Sender(port='COM18', baudrate=115200) # 初始化串口   记得修改端口
+yolo_worker= YOLO_Work(model, pad=30)
 
 current_state = 1
 
@@ -54,28 +56,19 @@ class TargetDetector:
     """
     def __init__(self,pnpsolve:PnP_solve):
         self.pnp = pnpsolve
-        self.last_M = None
         self.keeptime = 0
         self.kernel = np.ones((5,5),dtype=np.uint8)
 
     def detect(self,frame):
         length , width = frame.shape[:2]
-
-        yolo_results = model(frame,verbose=False,conf=0.7)
+        roi = yolo_worker.feed_and_get_roi(frame)
 
         roi_x1 , roi_y1 = 0,0
         roi_x2 , roi_y2 = width,length
         use_roi = False
 
-        if len(yolo_results) > 0 and len(yolo_results[0].boxes) > 0:
-            # 取置信度最高的那一个黑框
-            box = yolo_results[0].boxes[0].xyxy.cpu().numpy().squeeze()
-            # 多留15个像素 ，防止切图太贴把黑框最边缘切丢了
-            pad = 15
-            roi_x1 = max(0, int(box[0]) - pad)
-            roi_y1 = max(0, int(box[1]) - pad)
-            roi_x2 = min(width, int(box[2]) + pad)
-            roi_y2 = min(length, int(box[3]) + pad)
+        if roi is not None:
+            roi_x1, roi_y1, roi_x2, roi_y2 = roi
             use_roi = True
 
         # 真正切下需要检测的图像  如果YOLO找到了框，则为找到的图 没找到则为原图
@@ -86,12 +79,14 @@ class TargetDetector:
 
         #二值化
         """
-        yolo找到黑框采用大津法 没找到则使用局部自适应
+        yolo找到黑框采用大津法 没找到则使用局部自适应 并将self.last_roi 置为None
         """
         if use_roi:
             _ , binary = cv2.threshold(gray_Biur_img,0,255,cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         else:
             binary = cv2.adaptiveThreshold(gray_Biur_img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,blockSize=9,C=2)
+            self.last_roi = None
+
 
         closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.kernel,iterations=2) #闭运算去除微小噪点
         #closed = cv2.dilate(closed, self.kernel, iterations=1)
@@ -143,6 +138,15 @@ class TargetDetector:
             inner_approx[:, 0] += roi_x1
             inner_approx[:, 1] += roi_y1
 
+            #大津法找到4边形，把上下左右范围反馈给后台小框
+            #小框随时跟着真实的黑框在画面里平移，彻底解决边缘漏框问题！
+            min_x = max(0, int(np.min(outer_approx[:, 0])) - 30)
+            min_y = max(0, int(np.min(outer_approx[:, 1])) - 30)
+            max_x = min(width, int(np.max(outer_approx[:, 0])) + 30)
+            max_y = min(length, int(np.max(outer_approx[:, 1])) + 30)
+
+            yolo_worker.update_roi_from_otsu((min_x, min_y, max_x, max_y))
+
             #内外框顶点排序
             ordered_outer = order_points(outer_approx)
             ordered_inner = order_points(inner_approx)
@@ -178,6 +182,10 @@ class TargetDetector:
             'rvec': rvec, 'tvec': tvec,
             'binary':binary,
             })
+        
+        else:
+            #只要局部图里没搜齐内外框 直接清零后台护盘
+            yolo_worker.feed_and_get_roi(frame, fallback_clear=True)
 
         return result
     
@@ -281,18 +289,22 @@ class CompetitionStateMachine:
                 error_y = self.smooth_error_y
             else: #没有激光点 pnp预测
                 predict_bx, predict_by = self.pnp.laser_hit(target_result['rvec'], target_result['tvec'])
-                if predict_bx is not None and predict_by is not None:
-                    error_x = predict_bx
-                    error_y = predict_by
+                if (predict_bx is not None and predict_by is not None and 
+                    not np.isnan(predict_bx) and not np.isnan(predict_by) and 
+                    not np.isinf(predict_bx) and not np.isinf(predict_by)):
+                    if predict_bx is not None and predict_by is not None:
+                        error_x = predict_bx
+                        error_y = predict_by
 
-                    point_pnp = np.array([[predict_bx, predict_by, 0.0]], dtype=np.float32)
-                    img_pts, _ = cv2.projectPoints(point_pnp, target_result['rvec'], target_result['tvec'],\
-                                                   self.pnp.camera_matrix, self.pnp.dist)
-                    pred_px, pred_py = img_pts[0][0][0], img_pts[0][0][1]
-                    
-                    cv2.drawMarker(frame, (int(pred_px), int(pred_py)), (0, 255, 0), cv2.MARKER_CROSS, 18, 2)
-                    cv2.putText(frame, f"Laser_World: ({error_x:.1f}, {error_y:.1f})mm", \
-                            (int(pred_px)+15, int(pred_py)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                        point_pnp = np.array([[predict_bx, predict_by, 0.0]], dtype=np.float32)
+                        img_pts, _ = cv2.projectPoints(point_pnp, target_result['rvec'], target_result['tvec'],\
+                                                    self.pnp.camera_matrix, self.pnp.dist)
+                        pred_px, pred_py = img_pts[0][0][0], img_pts[0][0][1]
+                        
+                        if not np.isnan(pred_px) and not np.isnan(pred_py) and not np.isinf(pred_px) and not np.isinf(pred_py):
+                            cv2.drawMarker(frame, (int(pred_px), int(pred_py)), (0, 255, 0), cv2.MARKER_CROSS, 18, 2)
+                            cv2.putText(frame, f"Laser_World: ({error_x:.1f}, {error_y:.1f})mm", \
+                                    (int(pred_px)+15, int(pred_py)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
                 else:
                     error_x = target_result['offset_x']
