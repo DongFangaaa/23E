@@ -1,0 +1,30 @@
+# Keil MDK-ARM 编译生成的中间文件和垃圾文件
+*.o
+*.d
+*.crf
+*.map
+*.axf
+*.htm
+*.lnp
+*.sct
+*.dep
+*.iex
+*.bak
+*.hex
+*.bin
+
+# 用户个人配置文件
+*.uvoptx
+*.uvgui.*
+*.uvguix.*
+*._2i
+*.scvd
+
+# 默认的编译输出文件夹
+Objects/
+Listings/
+DebugConfig/
+
+# 操作系统的隐藏文件
+.DS_Store
+Thumbs.db

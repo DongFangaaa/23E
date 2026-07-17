@@ -2,10 +2,14 @@ from ultralytics import YOLO
 import torch
 
 def main():
-    print(f"基础模型 yolov8n.pt")
-
-    # 1. 载入官方模型
-    model = YOLO('yolov8n.pt')
+    print(f"基础模型 yolov5n.pt")
+    device = '0' if torch.cuda.is_available() else 'cpu'
+    if device == '0':
+        print(f"GPU 显卡型号: {torch.cuda.get_device_name(0)}")
+    else:
+        print("CPU")
+    # 载入官方模型
+    model = YOLO('yolov5n.pt')
 
     
     results = model.train(
@@ -15,7 +19,7 @@ def main():
         batch=16,                                  
         workers=0,                                 
         device=device,                             
-        name='board_detect_result'                 
+        name='light_board'                 
     )
     
     print("\n模型训练完成")

@@ -3,7 +3,7 @@ import numpy as np
 from ultralytics import YOLO
 import sys
 
-sys.path.append(r'D:\Git\23年E题\视觉 串口')
+sys.path.append(r'D:\Git\23年E题\vision_uart')
 
 from uart_driver import UART_Sender
 from pnp_solve import PnP_solve
@@ -11,7 +11,7 @@ from pnp_solve import PnP_solve
 # ========================================
 # 第一部分：全局初始化
 # ========================================
-model = YOLO('best.pt')            # 你自己训练的靶纸/目标模型
+model = YOLO('light_best.pt')            # 你自己训练的靶纸/目标模型
 cap = cv2.VideoCapture(1)
 uart = UART_Sender(port='COM18', baudrate=115200)
 pnp = PnP_solve(rect_width=215.0, rect_length=305.0, focal_length=600.0)
