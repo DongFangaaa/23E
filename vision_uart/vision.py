@@ -333,6 +333,7 @@ def main():
     target_detector = TargetDetector(pnp_engine)
     laser_detector = LaserDetector(pnp_engine)
     brain = CompetitionStateMachine(uart,pnp_engine)
+    fps = 0.0
     
     while True:
         start_time = cv2.getTickCount()
@@ -353,7 +354,12 @@ def main():
         brain.step(target_result, laser_found, laser_bx, laser_by,frame,current_state) #传输参数
         
         current_time = cv2.getTickCount()
-        fps = cv2.getTickFrequency() / (current_time - start_time)
+        instant_fps = cv2.getTickFrequency() / (current_time - start_time)
+        if fps:
+            fps = 0.90 * fps + 0.10 * instant_fps
+        else:
+            fps = instant_fps
+        
         cv2.putText(frame, f"FPS: {fps:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         cv2.imshow("Camera PnP", frame)
